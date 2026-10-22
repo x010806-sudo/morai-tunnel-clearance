@@ -1,0 +1,260 @@
+<launch>
+  <!-- GPS·IMU·EgoStatus UDP + MGeo EKF + Pure Pursuit 실제 통합 런치 -->
+  <arg name="workspace_path" default="/opt/AutoVehicle/morai_ws" />
+  <arg name="path_file" default="$(arg workspace_path)/data/routes/2026_molit_comp_global_path.txt" />
+  <arg name="bind_ip" default="0.0.0.0" />
+  <arg name="gps_port" default="3001" />
+  <arg name="imu_port" default="4001" />
+  <arg name="ego_status_port" default="909" />
+  <arg name="morai_host_ip" default="192.168.0.147" />
+  <arg name="control_remote_port" default="9093" />
+  <arg name="control_source_port" default="9094" />
+  <arg name="enable_purepursuit" default="true" />
+  <arg name="enable_control" default="false" />
+  <arg name="wheelbase_m" default="3.0" />
+  <arg name="command_topic" default="/ctrl_cmd" />
+  <arg name="longl_cmd_type" default="1" />
+  <!-- 권장 주행: 곡률 속도 프로파일 + 목표속도 PI + accel/brake -->
+  <arg name="use_curvature_speed_planner" default="true" />
+  <arg name="target_speed_kph" default="30.0" />
+  <arg name="max_speed_kph" default="30.0" />
+  <arg name="lateral_accel_limit_mps2" default="1.0" />
+  <arg name="max_accel_mps2" default="1.0" />
+  <arg name="max_decel_mps2" default="1.5" />
+  <arg name="initial_speed_kph" default="0.0" />
+  <arg name="final_speed_kph" default="0.0" />
+  <arg name="speed_kp" default="0.8" />
+  <arg name="speed_ki" default="0.05" />
+  <arg name="speed_integral_limit_kph_s" default="10.8" />
+  <arg name="speed_error_deadband_kph" default="0.1" />
+  <!-- 곡률 기반 Pure Pursuit 회전 파라미터 -->
+  <arg name="curvature_half_window_points" default="1" />
+  <arg name="curvature_smoothing_window" default="5" />
+  <arg name="lookahead_min_m" default="4.0" />
+  <arg name="lookahead_gain" default="0.35" />
+  <arg name="lookahead_curvature_gain" default="6.0" />
+  <arg name="lookahead_tight_min_m" default="2.2" />
+  <arg name="lookahead_max_m" default="12.0" />
+  <arg name="curvature_preview_distance_m" default="8.0" />
+  <arg name="curvature_preview_step_m" default="0.5" />
+  <arg name="steering_feedforward_weight" default="0.35" />
+  <arg name="max_steering_rate_rad_s" default="2.5" />
+  <arg name="max_steering_rad" default="0.6981317008" />
+  <arg name="steering_sign" default="1.0" />
+  <arg name="ekf_gps_topic" default="/localization/gps" />
+  <arg name="ekf_imu_topic" default="/Imu" />
+  <arg name="ekf_default_gps_variance_m2" default="1.0" />
+  <arg name="ekf_gyro_noise_std_rad_s" default="0.08" />
+  <arg name="ekf_accel_noise_std_m_s2" default="0.8" />
+  <arg name="ekf_bias_random_walk" default="0.001" />
+  <arg name="use_sensor_quality_gate" default="false" />
+  <arg name="quality_topic" default="/localization/sensor_quality" />
+  <arg name="enable_gps_jump_gate" default="false" />
+  <arg name="gps_jump_gate_m" default="3.0" />
+  <arg name="gps_speed_gate_mps" default="10.0" />
+  <arg name="enable_gps_innovation_gate" default="false" />
+  <arg name="gps_innovation_gate_m" default="5.0" />
+
+  <!-- 1. MORAI GPS·IMU UDP -> /gps, /Imu -->
+  <include file="$(find morai_udp_bridge)/launch/morai_udp_bridge.launch">
+    <arg name="bind_ip" value="$(arg bind_ip)" />
+    <arg name="gps_port" value="$(arg gps_port)" />
+    <arg name="imu_port" value="$(arg imu_port)" />
+    <arg name="gps_frame_id" value="gps_link" />
+    <arg name="imu_frame_id" value="imu_link" />
+    <!-- GPS와 IMU를 Ubuntu 수신 시각으로 통일한다. -->
+    <arg name="imu_use_packet_time" value="false" />
+  </include>
+
+  <!-- 2. MORAI EgoVehicleStatus 수신 + CtrlCmd UDP 송신 -->
+  <include file="$(find morai_udp_drive_bridge)/launch/morai_udp_drive_bridge.launch">
+    <arg name="control_output_enabled" value="$(arg enable_control)" />
+    <arg name="status_bind_ip" value="$(arg bind_ip)" />
+    <arg name="status_port" value="$(arg ego_status_port)" />
+    <arg name="status_topic" value="/Ego_topic" />
+    <arg name="status_frame_id" value="map" />
+    <arg name="control_remote_ip" value="$(arg morai_host_ip)" />
+    <arg name="control_remote_port" value="$(arg control_remote_port)" />
+    <arg name="control_bind_port" value="$(arg control_source_port)" />
+    <arg name="command_topic" value="/ctrl_cmd" />
+    <arg name="longl_cmd_type" value="$(arg longl_cmd_type)" />
+    <arg name="max_wheel_angle_rad" value="$(arg max_steering_rad)" />
+  </include>
+
+  <!-- 3. 차량 기준점과 센서의 정적 TF -->
+  <node pkg="tf"
+        type="static_transform_publisher"
+        name="base_link_to_gps_link"
+        args="0 0 1.2 0 0 0 base_link gps_link 100" />
+  <node pkg="tf"
+        type="static_transform_publisher"
+        name="base_link_to_imu_link"
+        args="0 0 0 0 0 0 base_link imu_link 100" />
+
+  <!-- 4. GPS 위경도 -> MGeo local ENU /localization/gps -->
+  <include file="$(find gps_mgeo_converter)/launch/gps_mgeo_converter.launch">
+    <arg name="gps_xyz_x" value="0.0" />
+    <arg name="gps_xyz_y" value="0.0" />
+    <arg name="gps_xyz_z" value="1.2" />
+  </include>
+
+  <!-- 5. GPS + IMU -> MGeo map/base_link EKF -->
+  <include file="$(find ekf_local_enu)/launch/ekf_local_enu.launch">
+    <arg name="gps_topic" value="$(arg ekf_gps_topic)" />
+    <arg name="imu_topic" value="$(arg ekf_imu_topic)" />
+    <arg name="default_gps_variance_m2" value="$(arg ekf_default_gps_variance_m2)" />
+    <arg name="gyro_noise_std_rad_s" value="$(arg ekf_gyro_noise_std_rad_s)" />
+    <arg name="accel_noise_std_m_s2" value="$(arg ekf_accel_noise_std_m_s2)" />
+    <arg name="bias_random_walk" value="$(arg ekf_bias_random_walk)" />
+    <arg name="use_sensor_quality_gate" value="$(arg use_sensor_quality_gate)" />
+    <arg name="quality_topic" value="$(arg quality_topic)" />
+    <arg name="enable_gps_jump_gate" value="$(arg enable_gps_jump_gate)" />
+    <arg name="gps_jump_gate_m" value="$(arg gps_jump_gate_m)" />
+    <arg name="gps_speed_gate_mps" value="$(arg gps_speed_gate_mps)" />
+    <arg name="enable_gps_innovation_gate" value="$(arg enable_gps_innovation_gate)" />
+    <arg name="gps_innovation_gate_m" value="$(arg gps_innovation_gate_m)" />
+  </include>
+
+  <group if="$(arg enable_purepursuit)">
+  <!-- 6. EKF pose + 경로 -> 조향 및 종방향 CtrlCmd -->
+  <group unless="$(arg use_curvature_speed_planner)">
+    <include file="$(find purepursuit_mgeo)/launch/purepursuit_mgeo.launch">
+      <arg name="workspace_path" value="$(arg workspace_path)" />
+      <arg name="path_file" value="$(arg path_file)" />
+      <arg name="enable_purepursuit" default="true" />
+  <arg name="enable_control" value="$(arg enable_control)" />
+      <arg name="wheelbase_m" value="$(arg wheelbase_m)" />
+      <arg name="command_topic" value="$(arg command_topic)" />
+      <arg name="longl_cmd_type" value="$(arg longl_cmd_type)" />
+      <arg name="target_speed_kph" value="$(arg target_speed_kph)" />
+      <arg name="speed_kp" value="$(arg speed_kp)" />
+      <arg name="speed_ki" value="$(arg speed_ki)" />
+      <arg name="max_accel_mps2" value="$(arg max_accel_mps2)" />
+      <arg name="max_decel_mps2" value="$(arg max_decel_mps2)" />
+      <arg name="speed_integral_limit_kph_s" value="$(arg speed_integral_limit_kph_s)" />
+      <arg name="speed_error_deadband_kph" value="$(arg speed_error_deadband_kph)" />
+    </include>
+  </group>
+
+  <group if="$(arg use_curvature_speed_planner)">
+    <node pkg="curvature_speed_purepursuit"
+          type="curvature_speed_purepursuit_frenet_node.py"
+          name="curvature_speed_purepursuit"
+          output="screen">
+      <param name="path_file" value="$(arg path_file)" />
+      <param name="pose_topic" value="/localization/odometry" />
+      <param name="command_topic" value="$(arg command_topic)" />
+      <param name="publish_command" value="$(arg enable_control)" />
+      <param name="frenet_state_timeout_sec" value="0.8" />
+      <param name="avoidance_path_timeout_sec" value="0.8" />
+      <param name="pose_timeout_sec" value="0.5" />
+      <param name="duplicate_epsilon_m" value="0.000001" />
+      <param name="curvature_half_window_points" value="$(arg curvature_half_window_points)" />
+      <param name="curvature_smoothing_window" value="$(arg curvature_smoothing_window)" />
+      <param name="max_speed_kph" value="$(arg max_speed_kph)" />
+      <param name="lateral_accel_limit_mps2" value="$(arg lateral_accel_limit_mps2)" />
+      <param name="max_accel_mps2" value="$(arg max_accel_mps2)" />
+      <param name="max_decel_mps2" value="$(arg max_decel_mps2)" />
+      <param name="initial_speed_kph" value="$(arg initial_speed_kph)" />
+      <param name="final_speed_kph" value="$(arg final_speed_kph)" />
+      <param name="wheelbase_m" value="$(arg wheelbase_m)" />
+      <param name="lookahead_min_m" value="$(arg lookahead_min_m)" />
+      <param name="lookahead_gain" value="$(arg lookahead_gain)" />
+      <param name="lookahead_curvature_gain" value="$(arg lookahead_curvature_gain)" />
+      <param name="lookahead_tight_min_m" value="$(arg lookahead_tight_min_m)" />
+      <param name="lookahead_max_m" value="$(arg lookahead_max_m)" />
+      <param name="curvature_preview_distance_m" value="$(arg curvature_preview_distance_m)" />
+      <param name="curvature_preview_step_m" value="$(arg curvature_preview_step_m)" />
+      <param name="steering_feedforward_weight" value="$(arg steering_feedforward_weight)" />
+      <param name="max_steering_rate_rad_s" value="$(arg max_steering_rate_rad_s)" />
+      <param name="goal_tolerance_m" value="1.5" />
+      <param name="max_steering_rad" value="$(arg max_steering_rad)" />
+      <param name="steering_sign" value="$(arg steering_sign)" />
+      <param name="longl_cmd_type" value="$(arg longl_cmd_type)" />
+      <param name="speed_kp" value="$(arg speed_kp)" />
+      <param name="speed_ki" value="$(arg speed_ki)" />
+      <param name="speed_integral_limit_kph_s" value="$(arg speed_integral_limit_kph_s)" />
+      <param name="speed_error_deadband_kph" value="$(arg speed_error_deadband_kph)" />
+      <param name="control_rate_hz" value="20.0" />
+      <param name="progress_search_window_points" value="250" />
+      <param name="progress_backtrack_tolerance_m" value="2.0" />
+    </node>
+  </group>
+  </group>
+
+    <!-- LiDAR tracking -> /detection/obstacle_states for Frenet FSM -->
+  <include file="$(find lidar_perception)/launch/lidar_tracking.launch">
+    <arg name="bind_ip" value="$(arg bind_ip)" />
+    <arg name="odometry_topic" value="/localization/odometry" />
+    <arg name="obstacle_state_enabled" value="true" />
+    <arg name="obstacle_state_topic" value="/detection/obstacle_states" />
+    <arg name="rviz" value="false" />
+  </include>
+
+<!-- Frenet FSM: planning only.
+       Final /ctrl_cmd is published only by Frenet-aware curvature Pure Pursuit. -->
+  <node pkg="purepursuit_mgeo"
+        type="frenet_fsm_node.py"
+        name="frenet_fsm_controller"
+        output="screen">
+
+    <param name="path_file" value="$(arg path_file)" />
+
+    <!-- Frenet selects/plans the path only. -->
+    <param name="enable_control" value="false" />
+
+    <param name="normal_speed_mps" value="6.0" />
+    <param name="avoidance_speed_mps" value="6.0" />
+    <param name="return_speed_mps" value="6.0" />
+    <param name="maximum_lateral_acceleration_mps2" value="100.0" />
+    <param name="maximum_curvature_1pm" value="3.0" />
+    <!-- MORAI simulation test: on failed avoidance, keep following the map route. -->
+    <param name="fallback_to_reference_on_avoidance_failure" value="true" />
+
+    <param name="odometry_topic" value="/localization/odometry" />
+    <param name="obstacle_topic" value="/detection/obstacle_states" />
+    <param name="pedestrian_stop_topic"
+           value="/perception/pedestrian_crossing/stop_required" />
+
+    <!-- Kept for compatibility, but enable_control=false prevents publishing it. -->
+    <param name="command_topic" value="/ctrl_cmd" />
+
+    <param name="map_frame" value="map" />
+
+    <param name="wheelbase_m" value="3.0" />
+    <param name="vehicle_length_m" value="4.635" />
+    <param name="vehicle_width_m" value="1.892" />
+    <param name="rear_axle_to_center_m" value="1.35" />
+    <!-- Fixed corridor around the route: verify route is lane-centered. -->
+    <param name="lane_width_m" value="3.5" />
+    <param name="lane_boundary_margin_m" value="0.2" />
+    <param name="maximum_prediction_time_s" value="4.0" />
+    <param name="safety_margin_m" value="0.3" />
+    <param name="route_trigger_margin_m" value="0.0" />
+    <param name="assume_static_obstacles" value="true" />
+
+    <param name="control_rate_hz" value="20.0" />
+    <param name="planning_rate_hz" value="5.0" />
+
+    <param name="lookahead_min_m" value="4.0" />
+    <param name="lookahead_gain" value="0.35" />
+    <param name="return_lookahead_min_m" value="8.0" />
+    <param name="return_lookahead_gain" value="0.50" />
+
+    <param name="max_steering_rad" value="0.6981317" />
+    <param name="steering_sign" value="1.0" />
+
+    <param name="obstacle_trigger_distance_m" value="30.0" />
+    <param name="obstacle_rear_distance_m" value="3.0" />
+    <param name="obstacle_stale_timeout_s" value="0.6" />
+    <param name="require_obstacle_topic" value="true" />
+    <param name="clear_hold_s" value="1.5" />
+    <param name="return_tolerance_m" value="0.15" />
+
+    <param name="preferred_avoidance_side" value="none" />
+
+    <rosparam param="avoidance_offsets_m">[0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5, 3.0, -3.0, 3.5, -3.5, 3.7, -3.7, 3.8, -3.8, 4.0, -4.0, 4.5, -4.5, 5.0, -5.0, 5.5, -5.5, 6.0, -6.0]</rosparam>
+    <rosparam param="planning_times_s">[2.0, 3.0, 4.0]</rosparam>
+  </node>
+
+</launch>
